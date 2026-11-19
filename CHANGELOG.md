@@ -8,6 +8,8 @@ While the version is 0.x, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-19
+
 ### Upgrading
 
 - **Run `fp_0002_publication_creators` (or a host migration that adds the same
@@ -69,5 +71,6 @@ While the version is 0.x, minor releases may contain breaking changes.
 - Repository set up with its FAIR4RS metadata (CITATION.cff, codemeta.json,
   .zenodo.json), license, contributing guide and CI.
 
-[Unreleased]: https://github.com/shashankmc/fair-publishing/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/shashankmc/fair-publishing/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/shashankmc/fair-publishing/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/shashankmc/fair-publishing/releases/tag/v0.1.0

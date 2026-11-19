@@ -89,7 +89,7 @@ metadata is in [`CITATION.cff`](CITATION.cff) (GitHub's "Cite this repository"
 button reads it); [`codemeta.json`](codemeta.json) carries the same metadata in
 CodeMeta form.
 
-> Chakravarthy, S. (2026). *fair-publishing* (Version 0.1.0) [Computer software].
+> Chakravarthy, S. (2026). *fair-publishing* (Version 0.2.0) [Computer software].
 > Maastricht University. https://github.com/shashankmc/fair-publishing
 
 **DOI:** not yet assigned. Once the repository is connected to Zenodo, each

@@ -13,8 +13,8 @@ authors:
 license: MIT
 repository-code: "https://github.com/shashankmc/fair-publishing"
 url: "https://github.com/shashankmc/fair-publishing"
-version: "0.1.0"
-date-released: "2026-11-06"
+version: "0.2.0"
+date-released: "2026-11-19"
 keywords:
   - "FAIR"
   - "research data"

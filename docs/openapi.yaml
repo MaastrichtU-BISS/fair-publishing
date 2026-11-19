@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: fair-publishing HTTP API
-  version: 0.1.0
+  version: 0.2.0
   description: >-
     Mounted by the host under /api/publishing. Every route needs the host's
     sign-in; the host's identity resolver gives the owner. Errors are

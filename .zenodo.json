@@ -2,7 +2,7 @@
   "upload_type": "software",
   "title": "fair-publishing",
   "description": "Publishes datasets and models from a Flask application to a research repository (Zenodo in v1) under the user's own account, with DataCite metadata, RO-Crate, a dataset or model card, legal fields and label provenance, after an attestation of license, rights and personal data. Mounts in-process with init_publishing(app, ...) and receives artefacts from the host through a provider protocol.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "creators": [
     {
       "name": "Chakravarthy, Shashank",
