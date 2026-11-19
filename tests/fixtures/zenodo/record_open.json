@@ -1,0 +1,22 @@
+{
+  "id": 101,
+  "doi": "10.5072/zenodo.101",
+  "metadata": {
+    "title": "Tenancy clauses",
+    "access_right": "open",
+    "license": {
+      "id": "cc-by-4.0"
+    }
+  },
+  "files": [
+    {
+      "filename": "data.csv",
+      "filesize": 29,
+      "checksum": "840e326511d9a9dcadd5bd2e6f2f5481",
+      "links": {
+        "self": "https://zenodo.test/api/deposit/depositions/101/files/data.csv",
+        "download": "https://zenodo.test/api/records/101/files/data.csv/content"
+      }
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "id": 103,
+  "doi": "10.5072/zenodo.103",
+  "metadata": {
+    "title": "Tenancy clauses, restricted",
+    "access_right": "restricted",
+    "access_conditions": "Researchers at Dutch universities, on request.",
+    "license": {"id": "cc-by-4.0"}
+  },
+  "access": {"record": "public", "files": "restricted"},
+  "files": [
+    {
+      "key": "data.csv",
+      "size": 29,
+      "checksum": "md5:840e326511d9a9dcadd5bd2e6f2f5481",
+      "links": {"content": "https://zenodo.test/api/records/103/files/data.csv/content"}
+    }
+  ]
+}

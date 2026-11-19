@@ -1,0 +1,26 @@
+{
+  "id": 102,
+  "doi": "10.5072/zenodo.102",
+  "metadata": {
+    "title": "Tenancy clauses, second release",
+    "access_right": "open",
+    "license": {"id": "cc-by-4.0"}
+  },
+  "access": {"record": "public", "files": "public", "embargoed": false},
+  "files": {
+    "enabled": true,
+    "count": 1,
+    "total_bytes": 29,
+    "entries": {
+      "data.csv": {
+        "key": "data.csv",
+        "size": 29,
+        "checksum": "md5:840e326511d9a9dcadd5bd2e6f2f5481",
+        "links": {
+          "self": "https://zenodo.test/api/records/102/files/data.csv",
+          "content": "https://zenodo.test/api/records/102/files/data.csv/content"
+        }
+      }
+    }
+  }
+}

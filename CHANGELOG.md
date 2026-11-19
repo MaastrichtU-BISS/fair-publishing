@@ -8,6 +8,48 @@ While the version is 0.x, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
+### Upgrading
+
+- **Run `fp_0002_publication_creators` (or a host migration that adds the same
+  column) before deploying 0.2.0.** `Publication` now has a `creators` column, and
+  every registry query selects it, so an unmigrated database fails with "no such
+  column". `create_all` does not add columns to an existing table.
+
+### Added
+
+- `Zenodo.record_files(record_id)` and `Zenodo.download(record_id, key, max_bytes)`:
+  token-free reads of open records and their public files. They read both
+  Zenodo's InvenioRDM and legacy record shapes.
+  - Only the configured Zenodo host is requested, for the record and the file,
+    redirects included. Each redirect is checked before it is followed, and its
+    body is not read. URLs with backslashes, whitespace or credentials are refused.
+  - Record ids must be numeric.
+  - Each request (the record read, the file fetch) has a 10-minute deadline,
+    redirects included. Connect and read timeouts are capped at the time left,
+    and the body is checked against it as it streams. It is approximate: a
+    server that keeps trickling headers can run past it.
+  - A malformed record or file entry reads as not downloadable or raises
+    `RepositoryError`, never a bare Python error. Relative file links resolve
+    against the record as served, and links off Zenodo are left out of the listing.
+  - These reads use urllib3 directly, so no `.netrc` credentials are sent, and
+    they ask for unencoded bodies, so `max_bytes` counts the bytes that arrive.
+  - `RecordNotDownloadable` ("This record is no longer downloadable") covers a
+    record or file that is gone (404/410) or no longer public (401/403),
+    restricted and metadata-only records, and a missing file.
+  - `FileTooLarge` covers `max_bytes`. It is checked on the declared size and
+    while streaming.
+- `open_datasets(session)`: the open dataset Publications with a DOI and a Zenodo
+  record id, for a host's Community source.
+- The registry gets a `creators` column (revision `fp_0002_publication_creators`).
+  Entries published before this version list no creators.
+- `urllib3>=2.2` is now a direct dependency (`HTTPResponse.read1` arrived in 2.2).
+
+### Changed
+
+- `Zenodo(base_url, token=None)`: the token is optional, and sent only when given.
+- Public reads connect directly and trust the system CA store. Proxy and CA
+  settings for requests (`HTTPS_PROXY`, `REQUESTS_CA_BUNDLE`) apply to deposits only.
+
 ## [0.1.0] - 2026-11-06
 
 ### Added
