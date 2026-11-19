@@ -24,9 +24,10 @@ While the version is 0.x, minor releases may contain breaking changes.
     redirects included. Each redirect is checked before it is followed, and its
     body is not read. URLs with backslashes, whitespace or credentials are refused.
   - Record ids must be numeric.
-  - Each request (the record read, the file fetch) has a 10-minute overall
-    deadline, redirects included; connect and read timeouts are capped at the
-    time left.
+  - Each request (the record read, the file fetch) has a 10-minute deadline,
+    redirects included. Connect and read timeouts are capped at the time left,
+    and the body is checked against it as it streams. It is approximate: a
+    server that keeps trickling headers can run past it.
   - A malformed record or file entry reads as not downloadable or raises
     `RepositoryError`, never a bare Python error. Relative file links resolve
     against the record as served, and links off Zenodo are left out of the listing.

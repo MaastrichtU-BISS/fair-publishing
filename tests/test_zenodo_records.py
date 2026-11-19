@@ -562,3 +562,13 @@ def test_the_installed_urllib3_has_what_public_reads_need():
     import urllib3
 
     assert "decode_content" in inspect.signature(urllib3.HTTPResponse.read1).parameters
+
+
+@pytest.mark.parametrize("right", ["public", "restricted", "closed", "embargoed", None, 1])
+def test_only_a_legacy_open_flag_opens_a_record(zenodo, public, right):
+    record = json.loads((FIXTURES / "record_open_legacy.json").read_text().replace(RECORDED_HOST, zenodo.base))
+    record["metadata"]["access_right"] = right
+    zenodo.routes["/api/records/106"] = (200, {}, json.dumps(record).encode())
+    zenodo.file(106)
+
+    assert public.record_files(106)["downloadable"] is False

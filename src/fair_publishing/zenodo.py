@@ -173,8 +173,9 @@ class Zenodo:
         for _ in range(MAX_REDIRECTS + 1):
             if _origin(url) is None or _origin(url) != _origin(self.base_url):
                 raise RepositoryError("Zenodo linked a file somewhere other than Zenodo, so it was not fetched")
-            # Each hop's connect and read timeouts are capped at the time left, so
-            # slow headers or a stalled body cannot run far past the deadline.
+            # Each hop's connect and read timeouts are capped at the time left, so a
+            # stalled connection or body stops near the deadline. Headers that keep
+            # trickling in can run past it; only the configured Zenodo host sends them.
             left = _time_left(deadline)
             try:
                 response = http.request(
@@ -237,8 +238,8 @@ def _access(record):
         access = record["access"] if isinstance(record["access"], dict) else {}
         return {"record": access.get("record"), "files": access.get("files")}
     metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
-    right = metadata.get("access_right")
-    level = "public" if right == "open" else right
+    # Only "open" opens a legacy record; any other value, "public" included, does not.
+    level = "public" if metadata.get("access_right") == "open" else None
     return {"record": level, "files": level}
 
 
