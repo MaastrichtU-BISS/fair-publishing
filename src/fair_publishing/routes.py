@@ -189,6 +189,15 @@ def _checked(owner_id, body, artefact):
     return metadata, related_doi
 
 
+def _creators(metadata):
+    """The named creators, as the registry keeps them."""
+    return [
+        {"name": creator.get("name"), "affiliation": creator.get("affiliation"), "orcid": creator.get("orcid")}
+        for creator in metadata.get("creators") or []
+        if str(creator.get("name") or "").strip()
+    ]
+
+
 def _round_trip(owner_id, artefact):
     check = _host().artefact_provider.verify(owner_id, artefact)
     if not check.ok:
@@ -287,6 +296,7 @@ def publish():
         title=metadata["title"],
         description=metadata.get("description") or "",
         keywords=" ".join(metadata.get("keywords") or []),
+        creators=json.dumps(_creators(metadata)),
         doi=record["doi"],
         record_url=record["record_url"],
         access=body["access"],

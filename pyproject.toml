@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fair-publishing"
-version = "0.1.0"
+version = "0.2.0"
 description = "Publish datasets and models from a Flask app to Zenodo with FAIR metadata, under the user's own account."
 readme = "README.md"
 license = { text = "MIT" }

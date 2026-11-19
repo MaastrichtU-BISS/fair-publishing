@@ -8,6 +8,23 @@ While the version is 0.x, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- `Zenodo.record_files(record_id)` and `Zenodo.download(record_id, key, max_bytes)`:
+  public file download for open records, with no token. Only the configured Zenodo
+  host is ever requested, redirects included. Restricted and metadata-only records
+  are not downloadable. `RecordNotDownloadable` (its message: "This record is no
+  longer downloadable") covers a record that is gone, no longer open, or missing the
+  file; `FileTooLarge` covers `max_bytes`.
+- `open_datasets(session)`: the open dataset Publications with a DOI and a Zenodo
+  record id, for a host's Community source.
+- The registry gets a `creators` column (Alembic revision `fp_0002_publication_creators`).
+  Entries published before this version list no creators.
+
+### Changed
+
+- `Zenodo(base_url, token=None)`: the token is optional, and sent only when given.
+
 ## [0.1.0] - 2026-11-06
 
 ### Added
