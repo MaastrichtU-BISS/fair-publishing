@@ -4,7 +4,7 @@ from typing import Callable, Optional
 
 from .community import open_datasets
 from .protocols import Artefact, ArtefactProvider, DepositFile, RoundTrip, SecretStore
-from .zenodo import RecordNotDownloadable, RepositoryError, Zenodo
+from .zenodo import FileTooLarge, RecordNotDownloadable, RepositoryError, Zenodo
 
 __version__ = "0.2.0"
 
@@ -12,6 +12,7 @@ __all__ = [
     "Artefact",
     "ArtefactProvider",
     "DepositFile",
+    "FileTooLarge",
     "RecordNotDownloadable",
     "RepositoryError",
     "RoundTrip",

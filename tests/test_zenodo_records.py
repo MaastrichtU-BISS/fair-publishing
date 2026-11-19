@@ -1,120 +1,144 @@
-"""Public file download from Zenodo, against recorded responses at the HTTP boundary."""
+"""Public file download from Zenodo, against recorded responses served by a real
+local HTTP server, so the real transport (redirects, headers, streaming) runs."""
+import http.server
 import json
 import pathlib
+import threading
 
 import pytest
-import requests
 
-import fair_publishing.zenodo as zenodo_module
-from fair_publishing import RecordNotDownloadable, RepositoryError, Zenodo
-from fair_publishing.zenodo import FileTooLarge
+from fair_publishing import FileTooLarge, RecordNotDownloadable, RepositoryError, Zenodo
+from fair_publishing.zenodo import CHUNK_BYTES, _origin
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "zenodo"
-BASE = "https://zenodo.test"
 DATA = (FIXTURES / "data.csv").read_bytes()
-OPEN_CONTENT = f"{BASE}/api/records/101/files/data.csv/content"
+RECORDED_HOST = "https://zenodo.test"
 
 
-def recorded(name):
-    return json.loads((FIXTURES / name).read_text())
-
-
-class Reply:
-    def __init__(self, status, body=None, headers=None, content=b""):
-        self.status_code = status
-        self.headers = headers or {}
-        self._body = body
-        self._content = content
-        self.closed = False
-
-    def json(self):
-        return self._body
-
-    def iter_content(self, chunk_size=1):
-        for start in range(0, len(self._content), chunk_size):
-            yield self._content[start : start + chunk_size]
-
-    def close(self):
-        self.closed = True
-
-
-class FakeZenodoGet:
-    """Answers GET by URL with recorded replies; anything unrecorded is a 404."""
+class Server:
+    """A local HTTP server answering by path from `routes`; it logs each request."""
 
     def __init__(self):
-        self.calls = []
-        self.replies = {}
-        self.error = None
+        self.routes = {}
+        self.requests = []
+        server = self
 
-    def get(self, url, **kwargs):
-        self.calls.append({"url": url, **kwargs})
-        if self.error is not None:
-            raise self.error
-        if url in self.replies:
-            return self.replies[url]
-        return Reply(404, {"message": "Not found"})
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
 
-    def urls(self):
-        return [call["url"] for call in self.calls]
+            def do_GET(self):
+                server.requests.append({"path": self.path, "headers": dict(self.headers)})
+                route = server.routes.get(self.path)
+                if route is None:
+                    route = (404, {}, b'{"message": "Not found"}')
+                if callable(route):
+                    return route(self)
+                status, headers, body = route
+                self.send_response(status)
+                for name, value in headers.items():
+                    self.send_header(name, value)
+                if "Content-Length" not in headers:
+                    self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
 
-    def serve_record(self, fixture, status=200):
-        record = recorded(fixture)
-        self.replies[f"{BASE}/api/records/{record['id']}"] = Reply(status, record)
+            def log_message(self, *args):
+                pass
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.httpd.daemon_threads = True
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+
+    def paths(self):
+        return [entry["path"] for entry in self.requests]
+
+    def record(self, fixture, status=200):
+        """Serve a recorded record, its links moved onto this server."""
+        text = (FIXTURES / fixture).read_text().replace(RECORDED_HOST, self.base)
+        record = json.loads(text)
+        self.routes[f"/api/records/{record['id']}"] = (status, {"Content-Type": "application/json"}, text.encode())
         return record
 
+    def file(self, record_id, body=DATA, status=200, headers=None, key="data.csv"):
+        path = f"/api/records/{record_id}/files/{key}/content"
+        self.routes[path] = (status, headers or {}, body)
+        return path
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
 
 @pytest.fixture
-def http(monkeypatch):
-    fake = FakeZenodoGet()
-    monkeypatch.setattr(zenodo_module.requests, "get", fake.get)
-    return fake
+def zenodo():
+    server = Server()
+    yield server
+    server.close()
 
 
 @pytest.fixture
-def public():
-    return Zenodo(BASE)
+def elsewhere():
+    server = Server()
+    yield server
+    server.close()
+
+
+@pytest.fixture
+def public(zenodo):
+    return Zenodo(zenodo.base)
 
 
 @pytest.mark.parametrize(
-    ("fixture", "record_id", "file_url"),
-    [
-        ("record_open.json", 101, f"{BASE}/api/records/101/files/data.csv/content"),
-        ("record_open_entries.json", 102, f"{BASE}/api/records/102/files/data.csv/content"),
-    ],
-    ids=["list-shape", "entries-shape"],
+    ("fixture", "record_id"),
+    [("record_open.json", 101), ("record_open_entries.json", 102), ("record_open_legacy.json", 106)],
+    ids=["legacy-list", "rdm-entries", "legacy-real-capture"],
 )
-def test_an_open_record_lists_its_file_and_downloads_it(http, public, fixture, record_id, file_url):
-    http.serve_record(fixture)
-    http.replies[file_url] = Reply(200, content=DATA, headers={"Content-Length": str(len(DATA))})
+def test_an_open_record_lists_its_file_and_downloads_it(zenodo, public, fixture, record_id):
+    zenodo.record(fixture)
+    path = zenodo.file(record_id)
 
     listing = public.record_files(record_id)
 
     assert listing["downloadable"] is True
     assert listing["access"] == {"record": "public", "files": "public"}
     [file] = listing["files"]
-    assert file["key"] == "data.csv" and file["size"] == 29 and file["url"] == file_url
-    assert file["checksum"].endswith("840e326511d9a9dcadd5bd2e6f2f5481")
+    assert file["key"] == "data.csv" and file["url"] == zenodo.base + path
     assert public.download(record_id, "data.csv", max_bytes=1024) == DATA
 
 
-def test_no_token_is_sent_to_read_or_fetch_a_public_file(http):
-    http.serve_record("record_open.json")
-    http.replies[OPEN_CONTENT] = Reply(200, content=DATA)
-    client = Zenodo(BASE, token="zen-secret")
+def test_the_record_is_asked_for_in_its_rdm_shape_and_unencoded(zenodo, public):
+    zenodo.record("record_open_entries.json")
 
-    client.download(101, "data.csv", max_bytes=1024)
+    public.record_files(102)
 
-    assert len(http.calls) == 2
-    assert all("Authorization" not in (call.get("headers") or {}) for call in http.calls)
+    headers = zenodo.requests[0]["headers"]
+    assert headers["Accept"] == "application/vnd.inveniordm.v1+json"
+    assert headers["Accept-Encoding"] == "identity"
+
+
+def test_no_token_or_netrc_credentials_are_sent(zenodo, tmp_path, monkeypatch):
+    netrc = tmp_path / ".netrc"
+    netrc.write_text("machine 127.0.0.1 login someone password secret\n")
+    netrc.chmod(0o600)
+    monkeypatch.setenv("NETRC", str(netrc))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    zenodo.record("record_open.json")
+    zenodo.file(101)
+
+    Zenodo(zenodo.base, token="zen-secret").download(101, "data.csv", max_bytes=1024)
+
+    assert len(zenodo.requests) == 2
+    assert all("Authorization" not in entry["headers"] for entry in zenodo.requests)
 
 
 @pytest.mark.parametrize(
     "fixture",
-    ["record_restricted.json", "record_metadata_only.json"],
-    ids=["restricted", "metadata-only"],
+    ["record_restricted.json", "record_metadata_only.json", "record_restricted_legacy.json"],
+    ids=["restricted", "metadata-only", "restricted-legacy"],
 )
-def test_restricted_and_metadata_only_records_are_not_downloadable(http, public, fixture):
-    record = http.serve_record(fixture)
+def test_restricted_and_metadata_only_records_are_not_downloadable(zenodo, public, fixture):
+    record = zenodo.record(fixture)
 
     listing = public.record_files(record["id"])
 
@@ -122,124 +146,225 @@ def test_restricted_and_metadata_only_records_are_not_downloadable(http, public,
     assert listing["files"] == []
     with pytest.raises(RecordNotDownloadable, match="This record is no longer downloadable"):
         public.download(record["id"], "data.csv", max_bytes=1024)
-    assert not any("/files/" in url for url in http.urls())
+    assert not any("/files/" in path for path in zenodo.paths())
 
 
-@pytest.mark.parametrize("status", [404, 410])
-def test_a_record_that_is_gone_is_not_downloadable(http, public, status):
-    http.replies[f"{BASE}/api/records/101"] = Reply(status, recorded("gone.json"))
-
-    with pytest.raises(RecordNotDownloadable, match="This record is no longer downloadable"):
-        public.download(101, "data.csv", max_bytes=1024)
-
-
-def test_a_file_that_has_gone_is_not_downloadable(http, public):
-    http.serve_record("record_open.json")
-    http.replies[OPEN_CONTENT] = Reply(410, recorded("gone.json"))
+@pytest.mark.parametrize("status", [401, 403, 404, 410])
+def test_a_record_that_is_gone_or_no_longer_public_is_not_downloadable(zenodo, public, status):
+    zenodo.routes["/api/records/101"] = (status, {}, (FIXTURES / "gone.json").read_bytes())
 
     with pytest.raises(RecordNotDownloadable, match="This record is no longer downloadable"):
         public.download(101, "data.csv", max_bytes=1024)
 
 
-def test_a_key_the_record_does_not_have_is_not_downloadable(http, public):
-    http.serve_record("record_open.json")
+@pytest.mark.parametrize("status", [403, 410])
+def test_a_file_that_is_gone_or_no_longer_public_is_not_downloadable(zenodo, public, status):
+    zenodo.record("record_open.json")
+    zenodo.file(101, body=b"{}", status=status)
 
     with pytest.raises(RecordNotDownloadable, match="This record is no longer downloadable"):
+        public.download(101, "data.csv", max_bytes=1024)
+
+
+def test_a_key_the_record_does_not_have_is_not_downloadable(zenodo, public):
+    zenodo.record("record_open.json")
+
+    with pytest.raises(RecordNotDownloadable):
         public.download(101, "missing.csv", max_bytes=1024)
-    assert not any("/files/" in url for url in http.urls())
+    assert not any("/files/" in path for path in zenodo.paths())
 
 
-def test_a_link_off_zenodo_is_refused_and_never_requested(http, public):
-    http.serve_record("record_off_host.json")
+@pytest.mark.parametrize("record_id", ["1/../../../login?next=x", "12a", "", "١٢"])
+def test_a_record_id_that_is_not_a_number_is_refused_without_a_request(zenodo, public, record_id):
+    with pytest.raises(RepositoryError, match="not a Zenodo record id"):
+        public.record_files(record_id)
+    assert zenodo.requests == []
+
+
+def test_a_file_link_off_zenodo_is_refused_and_never_requested(zenodo, elsewhere, public):
+    record = json.loads((FIXTURES / "record_open_entries.json").read_text())
+    record["files"]["entries"]["data.csv"]["links"]["content"] = f"{elsewhere.base}/data.csv"
+    zenodo.routes["/api/records/102"] = (200, {}, json.dumps(record).encode())
 
     with pytest.raises(RepositoryError, match="somewhere other than Zenodo"):
-        public.download(105, "data.csv", max_bytes=1024)
-    assert all(url.startswith(BASE) for url in http.urls())
+        public.download(102, "data.csv", max_bytes=1024)
+    assert elsewhere.requests == []
 
 
-def test_a_redirect_off_zenodo_is_refused(http, public):
-    http.serve_record("record_open.json")
-    http.replies[OPEN_CONTENT] = Reply(302, headers={"Location": "https://files.example.org/data.csv"})
+@pytest.mark.parametrize(
+    "link",
+    [
+        "{elsewhere}\\@{host}/data.csv",  # urlsplit and urllib3 disagree on the host
+        "http://user:pass@{host}/data.csv",
+        "http://{host}/data .csv",
+    ],
+    ids=["backslash", "userinfo", "whitespace"],
+)
+def test_an_ambiguous_file_link_is_refused(zenodo, elsewhere, public, link):
+    host = zenodo.base.removeprefix("http://")
+    record = json.loads((FIXTURES / "record_open_entries.json").read_text())
+    record["files"]["entries"]["data.csv"]["links"]["content"] = link.format(elsewhere=elsewhere.base, host=host)
+    zenodo.routes["/api/records/102"] = (200, {}, json.dumps(record).encode())
+
+    with pytest.raises(RepositoryError, match="somewhere other than Zenodo"):
+        public.download(102, "data.csv", max_bytes=1024)
+    assert zenodo.paths() == ["/api/records/102"]
+    assert elsewhere.requests == []
+
+
+def test_a_relative_file_link_is_on_zenodo(zenodo, public):
+    record = json.loads((FIXTURES / "record_open_entries.json").read_text())
+    record["files"]["entries"]["data.csv"]["links"]["content"] = "/api/records/102/files/data.csv/content"
+    zenodo.routes["/api/records/102"] = (200, {}, json.dumps(record).encode())
+    zenodo.file(102)
+
+    assert public.download(102, "data.csv", max_bytes=1024) == DATA
+
+
+@pytest.mark.parametrize("target", ["file", "record"])
+def test_a_redirect_off_zenodo_is_refused_and_never_followed(zenodo, elsewhere, public, target):
+    elsewhere.routes["/data"] = (200, {}, DATA)
+    if target == "record":
+        zenodo.routes["/api/records/101"] = (302, {"Location": f"{elsewhere.base}/data"}, b"")
+    else:
+        zenodo.record("record_open.json")
+        zenodo.file(101, body=b"", status=302, headers={"Location": f"{elsewhere.base}/data"})
 
     with pytest.raises(RepositoryError, match="somewhere other than Zenodo"):
         public.download(101, "data.csv", max_bytes=1024)
-    assert all(url.startswith(BASE) for url in http.urls())
+    assert elsewhere.requests == []
 
 
-def test_a_redirect_on_zenodo_is_followed(http, public):
-    http.serve_record("record_open.json")
-    storage = f"{BASE}/api/files/bucket-101/data.csv"
-    http.replies[OPEN_CONTENT] = Reply(302, headers={"Location": "/api/files/bucket-101/data.csv"})
-    http.replies[storage] = Reply(200, content=DATA)
+def test_redirects_on_zenodo_are_followed_for_records_and_files(zenodo, public):
+    # Zenodo redirects a concept record to its latest version.
+    zenodo.routes["/api/records/100"] = (301, {"Location": "/api/records/101"}, b"")
+    zenodo.record("record_open.json")
+    zenodo.file(101, body=b"", status=302, headers={"Location": "/api/files/bucket-101/data.csv"})
+    zenodo.routes["/api/files/bucket-101/data.csv"] = (200, {}, DATA)
 
-    assert public.download(101, "data.csv", max_bytes=1024) == DATA
+    assert public.download(100, "data.csv", max_bytes=1024) == DATA
 
 
-def test_a_file_declared_over_max_bytes_is_refused_before_it_is_fetched(http, public):
-    http.serve_record("record_open.json")
-    http.replies[OPEN_CONTENT] = Reply(200, content=DATA)
+def test_a_redirect_body_is_not_read(zenodo, public):
+    """A redirect whose body never ends must not stall or fill memory."""
+
+    def endless_redirect(handler):
+        handler.send_response(302)
+        handler.send_header("Location", "/api/files/bucket-101/data.csv")
+        handler.send_header("Transfer-Encoding", "chunked")
+        handler.end_headers()
+        try:
+            while True:
+                handler.wfile.write(b"10000\r\n" + b"x" * 0x10000 + b"\r\n")
+        except OSError:
+            pass
+
+    zenodo.record("record_open.json")
+    zenodo.routes["/api/records/101/files/data.csv/content"] = endless_redirect
+    zenodo.routes["/api/files/bucket-101/data.csv"] = (200, {}, DATA)
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(body=public.download(101, "data.csv", max_bytes=1024)))
+    worker.start()
+    worker.join(timeout=10)
+
+    assert not worker.is_alive(), "the redirect body was read"
+    assert result["body"] == DATA
+
+
+def test_too_many_redirects_are_refused(zenodo, public):
+    zenodo.routes["/api/records/101"] = (302, {"Location": "/api/records/101"}, b"")
+
+    with pytest.raises(RepositoryError, match="redirected too many times"):
+        public.record_files(101)
+
+
+def test_a_redirect_without_a_location_is_refused(zenodo, public):
+    zenodo.routes["/api/records/101"] = (302, {}, b"")
+
+    with pytest.raises(RepositoryError, match="without saying where"):
+        public.record_files(101)
+
+
+def test_a_file_declared_over_max_bytes_in_the_record_is_refused_before_it_is_fetched(zenodo, public):
+    zenodo.record("record_open.json")
+    path = zenodo.file(101)
 
     with pytest.raises(FileTooLarge, match="larger than the 10-byte limit"):
         public.download(101, "data.csv", max_bytes=10)
-    assert OPEN_CONTENT not in http.urls()
+    assert path not in zenodo.paths()
 
 
-def test_a_file_that_streams_past_max_bytes_is_cut_off(http, public):
-    record = http.serve_record("record_open.json")
-    del record["files"][0]["filesize"]
-    http.replies[OPEN_CONTENT] = Reply(200, content=DATA)
+def test_a_content_length_over_max_bytes_is_refused_before_the_body_is_read(zenodo, public):
+    zenodo.record("record_open_legacy.json")  # its file has no size
+    zenodo.file(106, body=DATA, headers={"Content-Length": str(len(DATA))})
 
     with pytest.raises(FileTooLarge):
-        public.download(101, "data.csv", max_bytes=10)
+        public.download(106, "data.csv", max_bytes=10)
 
 
-def test_a_file_exactly_max_bytes_long_is_allowed(http, public):
-    http.serve_record("record_open.json")
-    http.replies[OPEN_CONTENT] = Reply(200, content=DATA)
+def test_a_file_that_streams_past_max_bytes_is_cut_off(zenodo, public):
+    zenodo.record("record_open_legacy.json")
+    body = b"x" * (CHUNK_BYTES * 3)
+
+    def unsized(handler):
+        handler.send_response(200)
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+        handler.wfile.write(body)
+
+    zenodo.routes["/api/records/106/files/data.csv/content"] = unsized
+
+    with pytest.raises(FileTooLarge):
+        public.download(106, "data.csv", max_bytes=CHUNK_BYTES + 1)
+
+
+def test_a_malformed_content_length_falls_back_to_the_streaming_cap(zenodo, public):
+    zenodo.record("record_open_legacy.json")
+
+    def malformed(handler):
+        handler.send_response(200)
+        handler.send_header("Content-Length", "abc")
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+        handler.wfile.write(DATA)
+
+    zenodo.routes["/api/records/106/files/data.csv/content"] = malformed
+
+    assert public.download(106, "data.csv", max_bytes=len(DATA)) == DATA
+
+
+def test_a_compressed_file_is_refused(zenodo, public):
+    zenodo.record("record_open_legacy.json")
+    zenodo.file(106, body=b"\x1f\x8b", headers={"Content-Encoding": "gzip"})
+
+    with pytest.raises(RepositoryError, match="gzip-encoded"):
+        public.download(106, "data.csv", max_bytes=1024)
+
+
+def test_a_file_exactly_max_bytes_long_is_allowed(zenodo, public):
+    zenodo.record("record_open.json")
+    zenodo.file(101)
 
     assert public.download(101, "data.csv", max_bytes=len(DATA)) == DATA
 
 
-def test_a_refused_record_read_is_a_repository_error(http, public):
-    http.replies[f"{BASE}/api/records/101"] = Reply(500, {"message": "Internal error"})
+def test_a_refused_record_read_is_a_repository_error(zenodo, public):
+    zenodo.routes["/api/records/101"] = (500, {}, b'{"message": "Internal error"}')
 
-    with pytest.raises(RepositoryError, match="refused to read the record: Internal error"):
+    with pytest.raises(RepositoryError, match="refused the request: 500"):
         public.record_files(101)
 
 
-def test_a_record_read_that_does_not_connect_is_a_repository_error(http, public):
-    http.error = requests.ConnectionError("no route")
+def test_a_record_read_that_does_not_connect_is_a_repository_error():
+    server = Server()
+    base = server.base
+    server.close()
 
-    with pytest.raises(RepositoryError, match="Zenodo did not answer: ConnectionError"):
-        public.record_files(101)
-
-
-def test_the_record_is_asked_for_in_its_rdm_shape(http, public):
-    http.serve_record("record_open_entries.json")
-
-    public.record_files(102)
-
-    assert http.calls[0]["headers"] == {"Accept": "application/vnd.inveniordm.v1+json"}
+    with pytest.raises(RepositoryError, match="Zenodo did not answer"):
+        Zenodo(base).record_files(101)
 
 
-def test_an_open_record_in_the_legacy_shape_downloads(http, public):
-    # Trimmed from a real capture: no `access` block, openness in
-    # metadata.access_right, and the file's content link under `self`.
-    http.serve_record("record_open_legacy.json")
-    content = f"{BASE}/api/records/103/files/data.csv/content"
-    http.replies[content] = Reply(200, content=DATA)
-
-    record = public.record_files(103)
-
-    assert record["downloadable"] is True
-    assert record["access"] == {"record": "public", "files": "public"}
-    assert record["files"][0]["url"] == content
-    assert public.download(103, "data.csv", max_bytes=len(DATA)) == DATA
-
-
-def test_a_restricted_record_in_the_legacy_shape_is_not_downloadable(http, public):
-    http.serve_record("record_restricted_legacy.json")
-
-    assert public.record_files(104)["downloadable"] is False
-    with pytest.raises(RecordNotDownloadable):
-        public.download(104, "data.csv", max_bytes=len(DATA))
+def test_origins_compare_default_ports_and_case():
+    assert _origin("https://Zenodo.org:443/a") == _origin("https://zenodo.org/b")
+    assert _origin("https://zenodo.org:8443/a") != _origin("https://zenodo.org/a")
+    assert _origin("/relative") is None

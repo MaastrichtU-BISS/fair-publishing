@@ -4,9 +4,10 @@
   "metadata": {
     "title": "Tenancy clauses",
     "access_right": "open",
-    "license": {"id": "cc-by-4.0"}
+    "license": {
+      "id": "cc-by-4.0"
+    }
   },
-  "access": {"record": "public", "files": "public"},
   "files": [
     {
       "filename": "data.csv",

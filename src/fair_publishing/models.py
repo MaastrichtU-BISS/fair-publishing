@@ -23,7 +23,7 @@ class Publication(PublishingBase):
     description: Mapped[str] = mapped_column(Text, default="")
     keywords: Mapped[str] = mapped_column(Text, default="")
     # JSON list of {"name", "affiliation", "orcid"}; empty for entries made before 0.2.0.
-    creators: Mapped[str] = mapped_column(Text, default="[]")
+    creators: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
     doi: Mapped[str] = mapped_column(String(255))
     record_url: Mapped[str] = mapped_column(String(1000))
     access: Mapped[str] = mapped_column(String(20))

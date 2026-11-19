@@ -1,5 +1,6 @@
 """The open dataset Publications, for a host's Community source to list and import from Zenodo."""
 import json
+import re
 from urllib.parse import urlsplit
 
 from .models import Publication
@@ -41,7 +42,7 @@ def open_datasets(session):
 def _record_id(publication):
     """The record id from the record's link, else from a Zenodo DOI (10.xxxx/zenodo.<id>)."""
     tail = urlsplit(publication.record_url or "").path.rstrip("/").rsplit("/", 1)[-1]
-    if tail.isdigit():
+    if re.fullmatch(r"[0-9]+", tail):
         return tail
-    suffix = publication.doi.rsplit("zenodo.", 1)[-1]
-    return suffix if suffix.isdigit() else None
+    found = re.fullmatch(r"10\.[0-9]+/zenodo\.([0-9]+)", publication.doi or "")
+    return found.group(1) if found else None

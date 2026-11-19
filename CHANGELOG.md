@@ -8,18 +8,34 @@ While the version is 0.x, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
+### Upgrading
+
+- **Run `fp_0002_publication_creators` (or a host migration that adds the same
+  column) before deploying 0.2.0.** `Publication` now has a `creators` column, and
+  every registry query selects it, so an unmigrated database fails with "no such
+  column". `create_all` does not add columns to an existing table.
+
 ### Added
 
 - `Zenodo.record_files(record_id)` and `Zenodo.download(record_id, key, max_bytes)`:
-  public file download for open records, with no token. Only the configured Zenodo
-  host is ever requested, redirects included. Restricted and metadata-only records
-  are not downloadable. `RecordNotDownloadable` (its message: "This record is no
-  longer downloadable") covers a record that is gone, no longer open, or missing the
-  file; `FileTooLarge` covers `max_bytes`.
+  token-free reads of open records and their public files. They read both
+  Zenodo's InvenioRDM and legacy record shapes.
+  - Only the configured Zenodo host is requested, for the record and the file,
+    redirects included. Each redirect is checked before it is followed, and its
+    body is not read. URLs with backslashes, whitespace or credentials are refused.
+  - Record ids must be numeric.
+  - These reads use urllib3 directly, so no `.netrc` credentials are sent, and
+    they ask for unencoded bodies, so `max_bytes` counts the bytes that arrive.
+  - `RecordNotDownloadable` ("This record is no longer downloadable") covers a
+    record or file that is gone (404/410) or no longer public (401/403),
+    restricted and metadata-only records, and a missing file.
+  - `FileTooLarge` covers `max_bytes`. It is checked on the declared size and
+    while streaming.
 - `open_datasets(session)`: the open dataset Publications with a DOI and a Zenodo
   record id, for a host's Community source.
-- The registry gets a `creators` column (Alembic revision `fp_0002_publication_creators`).
+- The registry gets a `creators` column (revision `fp_0002_publication_creators`).
   Entries published before this version list no creators.
+- `urllib3>=2` is now a direct dependency.
 
 ### Changed
 

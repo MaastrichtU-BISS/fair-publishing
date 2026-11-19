@@ -1,18 +1,28 @@
 """Zenodo's deposit API, with the user's own personal access token, and its
 public records API, which needs no token."""
-from urllib.parse import quote, urljoin, urlsplit
+import json
+import re
+from urllib.parse import quote, urljoin
 
 import requests
+import urllib3
+from urllib3.util import parse_url
 
 TIMEOUT_SECONDS = 120
 CHUNK_BYTES = 64 * 1024
 MAX_REDIRECTS = 3
-GONE_STATUSES = (404, 410)
+RECORD_MAX_BYTES = 10 * 1024 * 1024
+# Anonymous reads of a record or file that is gone or no longer public.
+NOT_DOWNLOADABLE_STATUSES = (401, 403, 404, 410)
 REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+DEFAULT_PORTS = {"http": 80, "https": 443}
+RECORD_ID = re.compile(r"[0-9]+")
 # Ask for the InvenioRDM shape (an `access` block, files as entries with a
 # `content` link); without it Zenodo answers in its legacy shape, which _access
-# and _file read as well.
-RECORD_ACCEPT = {"Accept": "application/vnd.inveniordm.v1+json"}
+# and _file read as well. Identity encoding keeps the size cap on the bytes
+# that actually arrive: no compressed body expands past it.
+RECORD_HEADERS = {"Accept": "application/vnd.inveniordm.v1+json", "Accept-Encoding": "identity"}
+FILE_HEADERS = {"Accept-Encoding": "identity"}
 
 
 class RepositoryError(Exception):
@@ -100,22 +110,20 @@ class Zenodo:
 
         Returns {"record_id", "access", "downloadable", "files"}; each file is
         {"key", "size", "checksum", "url"}. A record that is not open to everyone,
-        or has no files, is not downloadable and lists none. Raises
-        RecordNotDownloadable when Zenodo no longer has the record.
+        or has no file to fetch, is not downloadable and lists none. Raises
+        RecordNotDownloadable when Zenodo no longer serves the record.
         """
+        if not RECORD_ID.fullmatch(str(record_id)):
+            raise RepositoryError("That is not a Zenodo record id")
+        url = f"{self.base_url}/api/records/{record_id}"
         try:
-            response = requests.get(
-                f"{self.base_url}/api/records/{record_id}", headers=RECORD_ACCEPT, timeout=TIMEOUT_SECONDS
-            )
-            if response.status_code in GONE_STATUSES:
-                raise RecordNotDownloadable()
-            record = self._check(response, "read the record")
-        except requests.RequestException as exc:
-            raise RepositoryError(f"Zenodo did not answer: {type(exc).__name__}") from exc
+            record = json.loads(self._public_get(url, RECORD_HEADERS, RECORD_MAX_BYTES))
+        except ValueError as exc:
+            raise RepositoryError("Zenodo sent a record that is not JSON") from exc
         access = _access(record)
-        files = [_file(entry) for entry in _entries(record.get("files"))]
-        open_to_all = access["record"] == "public" and access["files"] == "public"
-        downloadable = open_to_all and bool(files)
+        files = [_file(entry, self.base_url) for entry in _entries(record.get("files"))]
+        files = [entry for entry in files if entry["url"]]
+        downloadable = access["record"] == "public" and access["files"] == "public" and bool(files)
         return {
             "record_id": str(record.get("id", record_id)),
             "access": access,
@@ -129,41 +137,62 @@ class Zenodo:
         if not record["downloadable"]:
             raise RecordNotDownloadable()
         file = next((entry for entry in record["files"] if entry["key"] == key), None)
-        if file is None or not file["url"]:
+        if file is None:
             raise RecordNotDownloadable()
         if file["size"] is not None and file["size"] > max_bytes:
             raise FileTooLarge(max_bytes)
-        return self._stream(file["url"], max_bytes)
+        return self._public_get(file["url"], FILE_HEADERS, max_bytes)
 
-    def _same_host(self, url):
-        """The fetch allowlist: only the configured Zenodo host, over its own scheme."""
-        base, link = urlsplit(self.base_url), urlsplit(url)
-        return (link.scheme, link.hostname, link.port) == (base.scheme, base.hostname, base.port)
+    def _public_get(self, url, headers, max_bytes):
+        """GET a public URL on the configured Zenodo host and return its body.
 
-    def _stream(self, url, max_bytes):
-        """Fetch a file without a token, following redirects only to the same host."""
+        Uses urllib3 rather than requests, on purpose: the host is checked with
+        the same parser that sends the request, no .netrc credentials are added,
+        and a redirect is not followed or its body read. Each redirect target is
+        checked again before it is requested."""
+        http = urllib3.PoolManager(retries=False, timeout=urllib3.Timeout(connect=30, read=TIMEOUT_SECONDS))
         for _ in range(MAX_REDIRECTS + 1):
-            if not self._same_host(url):
+            if _origin(url) is None or _origin(url) != _origin(self.base_url):
                 raise RepositoryError("Zenodo linked a file somewhere other than Zenodo, so it was not fetched")
             try:
-                response = requests.get(url, stream=True, allow_redirects=False, timeout=TIMEOUT_SECONDS)
-                try:
-                    if response.status_code in GONE_STATUSES:
-                        raise RecordNotDownloadable()
-                    if response.status_code in REDIRECT_STATUSES:
-                        location = response.headers.get("Location")
-                        if not location:
-                            raise RepositoryError("Zenodo redirected the file without saying where")
-                        url = urljoin(url, location)
-                        continue
-                    if response.status_code >= 300:
-                        raise RepositoryError(f"Zenodo refused to send the file: {response.status_code}")
-                    return _read_capped(response, max_bytes)
-                finally:
-                    response.close()
-            except requests.RequestException as exc:
+                response = http.request(
+                    "GET", url, headers=headers, redirect=False, preload_content=False, decode_content=False
+                )
+            except urllib3.exceptions.HTTPError as exc:
                 raise RepositoryError(f"Zenodo did not answer: {type(exc).__name__}") from exc
-        raise RepositoryError("Zenodo redirected the file too many times")
+            try:
+                if response.status in NOT_DOWNLOADABLE_STATUSES:
+                    raise RecordNotDownloadable()
+                if response.status in REDIRECT_STATUSES:
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise RepositoryError("Zenodo redirected without saying where")
+                    url = urljoin(url, location)
+                    continue
+                if response.status >= 300:
+                    raise RepositoryError(f"Zenodo refused the request: {response.status}")
+                return _read_capped(response, max_bytes)
+            except urllib3.exceptions.HTTPError as exc:
+                raise RepositoryError(f"Zenodo did not answer: {type(exc).__name__}") from exc
+            finally:
+                response.close()
+        raise RepositoryError("Zenodo redirected too many times")
+
+
+def _origin(url):
+    """(scheme, host, port) as urllib3 sends to it, or None for a URL that is
+    ambiguous (backslashes, whitespace or control characters) or carries
+    credentials."""
+    if not url or any(char == "\\" or ord(char) <= 0x20 or ord(char) == 0x7F for char in url):
+        return None
+    try:
+        parsed = parse_url(url)
+    except ValueError:
+        return None
+    if parsed.auth or not parsed.scheme or not parsed.host:
+        return None
+    scheme = parsed.scheme.lower()
+    return scheme, parsed.host.lower(), parsed.port or DEFAULT_PORTS.get(scheme)
 
 
 def _access(record):
@@ -181,16 +210,19 @@ def _entries(files):
     """Zenodo lists a record's files as a list, or, in its newer records API, as entries keyed by name."""
     if isinstance(files, dict):
         files = list((files.get("entries") or {}).values())
-    return files or []
+    return [entry for entry in files or [] if isinstance(entry, dict)]
 
 
-def _file(entry):
+def _file(entry, base_url):
     links = entry.get("links") or {}
+    link = links.get("content") or links.get("download") or _content_link(links.get("self"))
+    size = entry.get("size")
     return {
         "key": entry.get("key") or entry.get("filename"),
-        "size": entry.get("size", entry.get("filesize")),
+        "size": size if size is not None else entry.get("filesize"),
         "checksum": entry.get("checksum"),
-        "url": links.get("content") or links.get("download") or _content_link(links.get("self")),
+        # A relative link is on the Zenodo host itself.
+        "url": urljoin(f"{base_url}/", link) if link else None,
     }
 
 
@@ -200,12 +232,18 @@ def _content_link(link):
 
 
 def _read_capped(response, max_bytes):
-    declared = response.headers.get("Content-Length")
-    if declared is not None and int(declared) > max_bytes:
+    encoding = (response.headers.get("Content-Encoding") or "identity").strip().lower()
+    if encoding != "identity":
+        raise RepositoryError(f"Zenodo sent the file {encoding}-encoded, though it was asked not to")
+    try:
+        declared = int(response.headers.get("Content-Length", ""))
+    except ValueError:
+        declared = None  # Missing or malformed: the streaming check below still holds.
+    if declared is not None and declared > max_bytes:
         raise FileTooLarge(max_bytes)
     body = bytearray()
-    for chunk in response.iter_content(chunk_size=CHUNK_BYTES):
-        body.extend(chunk)
-        if len(body) > max_bytes:
+    for chunk in response.stream(CHUNK_BYTES, decode_content=False):
+        if len(body) + len(chunk) > max_bytes:
             raise FileTooLarge(max_bytes)
+        body.extend(chunk)
     return bytes(body)

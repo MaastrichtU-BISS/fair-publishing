@@ -21,6 +21,8 @@ dependencies = [
     "Flask>=2.3,<4",
     "SQLAlchemy>=2.0,<3",
     "requests>=2.31,<3",
+    # Public Zenodo reads go through urllib3 directly (see zenodo._public_get).
+    "urllib3>=2,<3",
 ]
 
 [project.urls]

@@ -1,5 +1,5 @@
 {
-  "id": 104,
+  "id": 107,
   "doi": "10.5281/zenodo.8433301",
   "conceptrecid": "8433300",
   "created": "2023-10-12T02:36:57.930196+00:00",
@@ -22,11 +22,11 @@
       "size": null,
       "checksum": "md5:bdf900a870fec8bf9776a1142fa95031",
       "links": {
-        "self": "https://zenodo.test/api/records/104/files/data.csv/content"
+        "self": "https://zenodo.test/api/records/107/files/data.csv/content"
       }
     }
   ],
   "links": {
-    "self": "https://zenodo.test/api/records/103"
+    "self": "https://zenodo.test/api/records/107"
   }
 }
