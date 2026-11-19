@@ -24,6 +24,10 @@ While the version is 0.x, minor releases may contain breaking changes.
     redirects included. Each redirect is checked before it is followed, and its
     body is not read. URLs with backslashes, whitespace or credentials are refused.
   - Record ids must be numeric.
+  - Each read has a 10-minute overall deadline, as well as a 120 s socket timeout.
+  - A malformed record or file entry reads as not downloadable or raises
+    `RepositoryError`, never a bare Python error. Relative file links resolve
+    against the record as served, and links off Zenodo are left out of the listing.
   - These reads use urllib3 directly, so no `.netrc` credentials are sent, and
     they ask for unencoded bodies, so `max_bytes` counts the bytes that arrive.
   - `RecordNotDownloadable` ("This record is no longer downloadable") covers a
@@ -40,6 +44,8 @@ While the version is 0.x, minor releases may contain breaking changes.
 ### Changed
 
 - `Zenodo(base_url, token=None)`: the token is optional, and sent only when given.
+- Public reads connect directly and trust the system CA store. Proxy and CA
+  settings for requests (`HTTPS_PROXY`, `REQUESTS_CA_BUNDLE`) apply to deposits only.
 
 ## [0.1.0] - 2026-11-06
 

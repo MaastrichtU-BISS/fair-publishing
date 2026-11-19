@@ -4,8 +4,11 @@ import http.server
 import json
 import pathlib
 import threading
+import time
 
 import pytest
+
+import fair_publishing.zenodo as zenodo_module
 
 from fair_publishing import FileTooLarge, RecordNotDownloadable, RepositoryError, Zenodo
 from fair_publishing.zenodo import CHUNK_BYTES, _origin
@@ -181,12 +184,13 @@ def test_a_record_id_that_is_not_a_number_is_refused_without_a_request(zenodo, p
     assert zenodo.requests == []
 
 
-def test_a_file_link_off_zenodo_is_refused_and_never_requested(zenodo, elsewhere, public):
+def test_a_file_link_off_zenodo_is_not_listed_and_never_requested(zenodo, elsewhere, public):
     record = json.loads((FIXTURES / "record_open_entries.json").read_text())
     record["files"]["entries"]["data.csv"]["links"]["content"] = f"{elsewhere.base}/data.csv"
     zenodo.routes["/api/records/102"] = (200, {}, json.dumps(record).encode())
 
-    with pytest.raises(RepositoryError, match="somewhere other than Zenodo"):
+    assert public.record_files(102)["downloadable"] is False
+    with pytest.raises(RecordNotDownloadable):
         public.download(102, "data.csv", max_bytes=1024)
     assert elsewhere.requests == []
 
@@ -206,7 +210,7 @@ def test_an_ambiguous_file_link_is_refused(zenodo, elsewhere, public, link):
     record["files"]["entries"]["data.csv"]["links"]["content"] = link.format(elsewhere=elsewhere.base, host=host)
     zenodo.routes["/api/records/102"] = (200, {}, json.dumps(record).encode())
 
-    with pytest.raises(RepositoryError, match="somewhere other than Zenodo"):
+    with pytest.raises(RecordNotDownloadable):
         public.download(102, "data.csv", max_bytes=1024)
     assert zenodo.paths() == ["/api/records/102"]
     assert elsewhere.requests == []
@@ -248,14 +252,17 @@ def test_redirects_on_zenodo_are_followed_for_records_and_files(zenodo, public):
 def test_a_redirect_body_is_not_read(zenodo, public):
     """A redirect whose body never ends must not stall or fill memory."""
 
+    release = threading.Event()
+
     def endless_redirect(handler):
         handler.send_response(302)
         handler.send_header("Location", "/api/files/bucket-101/data.csv")
         handler.send_header("Transfer-Encoding", "chunked")
         handler.end_headers()
         try:
-            while True:
+            while not release.is_set():
                 handler.wfile.write(b"10000\r\n" + b"x" * 0x10000 + b"\r\n")
+            handler.wfile.write(b"0\r\n\r\n")  # end the body, so a regressed client finishes
         except OSError:
             pass
 
@@ -263,11 +270,18 @@ def test_a_redirect_body_is_not_read(zenodo, public):
     zenodo.routes["/api/records/101/files/data.csv/content"] = endless_redirect
     zenodo.routes["/api/files/bucket-101/data.csv"] = (200, {}, DATA)
     result = {}
-    worker = threading.Thread(target=lambda: result.update(body=public.download(101, "data.csv", max_bytes=1024)))
+    worker = threading.Thread(
+        target=lambda: result.update(body=public.download(101, "data.csv", max_bytes=1024)), daemon=True
+    )
     worker.start()
-    worker.join(timeout=10)
+    try:
+        worker.join(timeout=10)
+        finished = not worker.is_alive()
+    finally:
+        release.set()
+        worker.join(timeout=30)
 
-    assert not worker.is_alive(), "the redirect body was read"
+    assert finished, "the redirect body was read"
     assert result["body"] == DATA
 
 
@@ -368,3 +382,82 @@ def test_origins_compare_default_ports_and_case():
     assert _origin("https://Zenodo.org:443/a") == _origin("https://zenodo.org/b")
     assert _origin("https://zenodo.org:8443/a") != _origin("https://zenodo.org/a")
     assert _origin("/relative") is None
+
+
+def test_a_path_relative_file_link_resolves_against_the_record_as_served(zenodo, public):
+    zenodo.routes["/api/records/108"] = (301, {"Location": "/api/records/108/"}, b"")
+    record = json.loads((FIXTURES / "record_open_entries.json").read_text())
+    record["id"] = 108
+    record["files"]["entries"]["data.csv"]["links"]["content"] = "files/data.csv/content"
+    zenodo.routes["/api/records/108/"] = (200, {}, json.dumps(record).encode())
+    zenodo.routes["/api/records/108/files/data.csv/content"] = (200, {}, DATA)
+
+    assert public.download(108, "data.csv", max_bytes=1024) == DATA
+
+
+@pytest.mark.parametrize("target", ["record", "file"])
+def test_a_malformed_redirect_location_is_a_repository_error(zenodo, public, target):
+    bad = (302, {"Location": "http://[not-a-host/x"}, b"")
+    if target == "record":
+        zenodo.routes["/api/records/101"] = bad
+    else:
+        zenodo.record("record_open.json")
+        zenodo.routes["/api/records/101/files/data.csv/content"] = bad
+
+    with pytest.raises(RepositoryError, match="not a URL|somewhere other than Zenodo"):
+        public.download(101, "data.csv", max_bytes=1024)
+
+
+@pytest.mark.parametrize("body", [b"[1, 2]", b"null", b'"error"'])
+def test_a_record_that_is_not_a_json_object_is_a_repository_error(zenodo, public, body):
+    zenodo.routes["/api/records/101"] = (200, {}, body)
+
+    with pytest.raises(RepositoryError, match="not a JSON object"):
+        public.record_files(101)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"key": "data.csv", "links": ["x"]},
+        {"key": "data.csv", "links": {"content": {"href": "x"}}},
+        {"key": "data.csv", "size": "5", "links": {"content": "/api/records/109/files/data.csv/content"}},
+        {"key": ["data.csv"], "links": {"content": "/api/records/109/files/data.csv/content"}},
+    ],
+    ids=["links-list", "link-not-text", "size-text", "key-not-text"],
+)
+def test_a_malformed_file_entry_is_not_an_unexpected_error(zenodo, public, entry):
+    record = {"id": 109, "access": {"record": "public", "files": "public"}, "metadata": [], "files": [entry]}
+    zenodo.routes["/api/records/109"] = (200, {}, json.dumps(record).encode())
+    zenodo.routes["/api/records/109/files/data.csv/content"] = (200, {}, DATA)
+
+    public.record_files(109)  # no AttributeError or TypeError
+    try:
+        assert public.download(109, "data.csv", max_bytes=1024) == DATA
+    except RecordNotDownloadable:
+        pass
+
+
+def test_a_trickled_body_stops_at_the_deadline(zenodo, public, monkeypatch):
+    monkeypatch.setattr(zenodo_module, "DEADLINE_SECONDS", 0.5)
+    release = threading.Event()
+
+    def trickle(handler):
+        handler.send_response(200)
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+        try:
+            while not release.is_set():
+                handler.wfile.write(b"x")
+                handler.wfile.flush()
+                time.sleep(0.05)
+        except OSError:
+            pass
+
+    zenodo.record("record_open_legacy.json")
+    zenodo.routes["/api/records/106/files/data.csv/content"] = trickle
+    try:
+        with pytest.raises(RepositoryError, match="took too long"):
+            public.download(106, "data.csv", max_bytes=1024)
+    finally:
+        release.set()

@@ -2,6 +2,7 @@
 public records API, which needs no token."""
 import json
 import re
+import time
 from urllib.parse import quote, urljoin
 
 import requests
@@ -12,6 +13,8 @@ TIMEOUT_SECONDS = 120
 CHUNK_BYTES = 64 * 1024
 MAX_REDIRECTS = 3
 RECORD_MAX_BYTES = 10 * 1024 * 1024
+# The whole read, not one socket read: a server trickling bytes cannot hold a worker longer.
+DEADLINE_SECONDS = 600
 # Anonymous reads of a record or file that is gone or no longer public.
 NOT_DOWNLOADABLE_STATUSES = (401, 403, 404, 410)
 REDIRECT_STATUSES = (301, 302, 303, 307, 308)
@@ -115,14 +118,18 @@ class Zenodo:
         """
         if not RECORD_ID.fullmatch(str(record_id)):
             raise RepositoryError("That is not a Zenodo record id")
-        url = f"{self.base_url}/api/records/{record_id}"
+        body, record_url = self._public_get(f"{self.base_url}/api/records/{record_id}", RECORD_HEADERS, RECORD_MAX_BYTES)
         try:
-            record = json.loads(self._public_get(url, RECORD_HEADERS, RECORD_MAX_BYTES))
+            record = json.loads(body)
         except ValueError as exc:
             raise RepositoryError("Zenodo sent a record that is not JSON") from exc
+        if not isinstance(record, dict):
+            raise RepositoryError("Zenodo sent a record that is not a JSON object")
         access = _access(record)
-        files = [_file(entry, self.base_url) for entry in _entries(record.get("files"))]
-        files = [entry for entry in files if entry["url"]]
+        # Relative links resolve against the record as served (after any redirect);
+        # a link off Zenodo is left out, since it would never be fetched.
+        files = [_file(entry, record_url) for entry in _entries(record.get("files"))]
+        files = [entry for entry in files if entry["url"] and _origin(entry["url"]) == _origin(self.base_url)]
         downloadable = access["record"] == "public" and access["files"] == "public" and bool(files)
         return {
             "record_id": str(record.get("id", record_id)),
@@ -141,16 +148,25 @@ class Zenodo:
             raise RecordNotDownloadable()
         if file["size"] is not None and file["size"] > max_bytes:
             raise FileTooLarge(max_bytes)
-        return self._public_get(file["url"], FILE_HEADERS, max_bytes)
+        return self._public_get(file["url"], FILE_HEADERS, max_bytes)[0]
 
     def _public_get(self, url, headers, max_bytes):
-        """GET a public URL on the configured Zenodo host and return its body.
+        """GET a public URL on the configured Zenodo host and return its body and
+        the URL that served it.
 
         Uses urllib3 rather than requests, on purpose: the host is checked with
         the same parser that sends the request, no .netrc credentials are added,
         and a redirect is not followed or its body read. Each redirect target is
-        checked again before it is requested."""
-        http = urllib3.PoolManager(retries=False, timeout=urllib3.Timeout(connect=30, read=TIMEOUT_SECONDS))
+        checked again before it is requested.
+
+        Proxies and CA bundles set for requests (HTTPS_PROXY, REQUESTS_CA_BUNDLE)
+        do not apply here; urllib3 uses the system trust store and connects
+        directly."""
+        deadline = time.monotonic() + DEADLINE_SECONDS
+        with urllib3.PoolManager(retries=False, timeout=urllib3.Timeout(connect=30, read=TIMEOUT_SECONDS)) as http:
+            return self._follow(http, url, headers, max_bytes, deadline)
+
+    def _follow(self, http, url, headers, max_bytes, deadline):
         for _ in range(MAX_REDIRECTS + 1):
             if _origin(url) is None or _origin(url) != _origin(self.base_url):
                 raise RepositoryError("Zenodo linked a file somewhere other than Zenodo, so it was not fetched")
@@ -167,11 +183,14 @@ class Zenodo:
                     location = response.headers.get("Location")
                     if not location:
                         raise RepositoryError("Zenodo redirected without saying where")
-                    url = urljoin(url, location)
+                    try:
+                        url = urljoin(url, location)
+                    except ValueError as exc:
+                        raise RepositoryError("Zenodo redirected to an address that is not a URL") from exc
                     continue
                 if response.status >= 300:
                     raise RepositoryError(f"Zenodo refused the request: {response.status}")
-                return _read_capped(response, max_bytes)
+                return _read_capped(response, max_bytes, deadline), url
             except urllib3.exceptions.HTTPError as exc:
                 raise RepositoryError(f"Zenodo did not answer: {type(exc).__name__}") from exc
             finally:
@@ -201,7 +220,8 @@ def _access(record):
     access = record.get("access")
     if isinstance(access, dict):
         return {"record": access.get("record"), "files": access.get("files")}
-    right = (record.get("metadata") or {}).get("access_right")
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    right = metadata.get("access_right")
     level = "public" if right == "open" else right
     return {"record": level, "files": level}
 
@@ -213,17 +233,30 @@ def _entries(files):
     return [entry for entry in files or [] if isinstance(entry, dict)]
 
 
-def _file(entry, base_url):
-    links = entry.get("links") or {}
-    link = links.get("content") or links.get("download") or _content_link(links.get("self"))
-    size = entry.get("size")
+def _file(entry, record_url):
+    """One file of a record. Fields of the wrong type read as missing, so a
+    malformed record is not downloadable rather than an error."""
+    links = entry.get("links") if isinstance(entry.get("links"), dict) else {}
+    link = _text(links.get("content")) or _text(links.get("download")) or _content_link(_text(links.get("self")))
+    size = next((value for value in (entry.get("size"), entry.get("filesize")) if _count(value)), None)
+    try:
+        url = urljoin(record_url, link) if link else None
+    except ValueError:
+        url = None
     return {
-        "key": entry.get("key") or entry.get("filename"),
-        "size": size if size is not None else entry.get("filesize"),
-        "checksum": entry.get("checksum"),
-        # A relative link is on the Zenodo host itself.
-        "url": urljoin(f"{base_url}/", link) if link else None,
+        "key": _text(entry.get("key")) or _text(entry.get("filename")),
+        "size": size,
+        "checksum": _text(entry.get("checksum")),
+        "url": url,
     }
+
+
+def _text(value):
+    return value if isinstance(value, str) and value else None
+
+
+def _count(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _content_link(link):
@@ -231,10 +264,10 @@ def _content_link(link):
     return link if link and link.rstrip("/").endswith("/content") else None
 
 
-def _read_capped(response, max_bytes):
+def _read_capped(response, max_bytes, deadline):
     encoding = (response.headers.get("Content-Encoding") or "identity").strip().lower()
     if encoding != "identity":
-        raise RepositoryError(f"Zenodo sent the file {encoding}-encoded, though it was asked not to")
+        raise RepositoryError(f"Zenodo sent the response {encoding}-encoded, though it was asked not to")
     try:
         declared = int(response.headers.get("Content-Length", ""))
     except ValueError:
@@ -242,8 +275,12 @@ def _read_capped(response, max_bytes):
     if declared is not None and declared > max_bytes:
         raise FileTooLarge(max_bytes)
     body = bytearray()
-    for chunk in response.stream(CHUNK_BYTES, decode_content=False):
+    # read1 returns whatever has arrived, so the deadline is checked between
+    # small reads, not only after a full chunk.
+    while chunk := response.read1(CHUNK_BYTES, decode_content=False):
         if len(body) + len(chunk) > max_bytes:
             raise FileTooLarge(max_bytes)
+        if time.monotonic() > deadline:
+            raise RepositoryError("Zenodo took too long to send the response")
         body.extend(chunk)
     return bytes(body)
