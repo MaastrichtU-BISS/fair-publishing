@@ -129,7 +129,10 @@ class Zenodo:
         # Relative links resolve against the record as served (after any redirect);
         # a link off Zenodo is left out, since it would never be fetched.
         files = [_file(entry, record_url) for entry in _entries(record.get("files"))]
-        files = [entry for entry in files if entry["url"] and _origin(entry["url"]) == _origin(self.base_url)]
+        files = [
+            entry for entry in files
+            if entry["key"] and entry["url"] and _origin(entry["url"]) == _origin(self.base_url)
+        ]
         downloadable = access["record"] == "public" and access["files"] == "public" and bool(files)
         return {
             "record_id": str(record.get("id", record_id)),
@@ -163,16 +166,20 @@ class Zenodo:
         do not apply here; urllib3 uses the system trust store and connects
         directly."""
         deadline = time.monotonic() + DEADLINE_SECONDS
-        with urllib3.PoolManager(retries=False, timeout=urllib3.Timeout(connect=30, read=TIMEOUT_SECONDS)) as http:
+        with urllib3.PoolManager(retries=False) as http:
             return self._follow(http, url, headers, max_bytes, deadline)
 
     def _follow(self, http, url, headers, max_bytes, deadline):
         for _ in range(MAX_REDIRECTS + 1):
             if _origin(url) is None or _origin(url) != _origin(self.base_url):
                 raise RepositoryError("Zenodo linked a file somewhere other than Zenodo, so it was not fetched")
+            # Each hop's connect and read timeouts are capped at the time left, so
+            # slow headers or a stalled body cannot run far past the deadline.
+            left = _time_left(deadline)
             try:
                 response = http.request(
-                    "GET", url, headers=headers, redirect=False, preload_content=False, decode_content=False
+                    "GET", url, headers=headers, redirect=False, preload_content=False, decode_content=False,
+                    timeout=urllib3.Timeout(connect=min(30, left), read=min(TIMEOUT_SECONDS, left)),
                 )
             except urllib3.exceptions.HTTPError as exc:
                 raise RepositoryError(f"Zenodo did not answer: {type(exc).__name__}") from exc
@@ -214,11 +221,20 @@ def _origin(url):
     return scheme, parsed.host.lower(), parsed.port or DEFAULT_PORTS.get(scheme)
 
 
+def _time_left(deadline):
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise RepositoryError("Zenodo took too long to send the response")
+    return left
+
+
 def _access(record):
     """{"record", "files"} as "public" or not. The legacy shape has only
-    metadata.access_right, where "open" means record and files are public."""
-    access = record.get("access")
-    if isinstance(access, dict):
+    metadata.access_right, where "open" means record and files are public; it is
+    read only when the RDM `access` block is absent, so a malformed block is
+    never open."""
+    if "access" in record:
+        access = record["access"] if isinstance(record["access"], dict) else {}
         return {"record": access.get("record"), "files": access.get("files")}
     metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
     right = metadata.get("access_right")
@@ -227,10 +243,14 @@ def _access(record):
 
 
 def _entries(files):
-    """Zenodo lists a record's files as a list, or, in its newer records API, as entries keyed by name."""
+    """Zenodo lists a record's files as a list, or, in its newer records API, as
+    entries keyed by name. Any other shape lists none."""
     if isinstance(files, dict):
-        files = list((files.get("entries") or {}).values())
-    return [entry for entry in files or [] if isinstance(entry, dict)]
+        entries = files.get("entries")
+        files = list(entries.values()) if isinstance(entries, dict) else []
+    if not isinstance(files, list):
+        return []
+    return [entry for entry in files if isinstance(entry, dict)]
 
 
 def _file(entry, record_url):
@@ -280,7 +300,7 @@ def _read_capped(response, max_bytes, deadline):
     while chunk := response.read1(CHUNK_BYTES, decode_content=False):
         if len(body) + len(chunk) > max_bytes:
             raise FileTooLarge(max_bytes)
-        if time.monotonic() > deadline:
-            raise RepositoryError("Zenodo took too long to send the response")
+        _time_left(deadline)
         body.extend(chunk)
+    _time_left(deadline)
     return bytes(body)

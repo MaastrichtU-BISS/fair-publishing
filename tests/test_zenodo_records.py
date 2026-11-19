@@ -48,7 +48,11 @@ class Server:
             def log_message(self, *args):
                 pass
 
-        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        class Quiet(http.server.ThreadingHTTPServer):
+            def handle_error(self, request, client_address):
+                pass  # a client that hangs up mid-response is expected here
+
+        self.httpd = Quiet(("127.0.0.1", 0), Handler)
         self.httpd.daemon_threads = True
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
         threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
@@ -438,6 +442,28 @@ def test_a_malformed_file_entry_is_not_an_unexpected_error(zenodo, public, entry
         pass
 
 
+def _bounded(call, release, seconds=10):
+    """Run call() on a daemon worker; release the server and give up after
+    `seconds`, so a regression fails the test instead of stalling the run."""
+    outcome = {}
+
+    def run():
+        try:
+            outcome["value"] = call()
+        except Exception as exc:  # noqa: BLE001 - the test inspects it
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    try:
+        worker.join(timeout=seconds)
+        finished = not worker.is_alive()
+    finally:
+        release.set()
+    assert finished, "the read ran past its deadline"
+    return outcome
+
+
 def test_a_trickled_body_stops_at_the_deadline(zenodo, public, monkeypatch):
     monkeypatch.setattr(zenodo_module, "DEADLINE_SECONDS", 0.5)
     release = threading.Event()
@@ -456,8 +482,83 @@ def test_a_trickled_body_stops_at_the_deadline(zenodo, public, monkeypatch):
 
     zenodo.record("record_open_legacy.json")
     zenodo.routes["/api/records/106/files/data.csv/content"] = trickle
-    try:
-        with pytest.raises(RepositoryError, match="took too long"):
-            public.download(106, "data.csv", max_bytes=1024)
-    finally:
-        release.set()
+
+    outcome = _bounded(lambda: public.download(106, "data.csv", max_bytes=1024), release)
+
+    assert isinstance(outcome.get("error"), RepositoryError) and "took too long" in str(outcome["error"])
+
+
+@pytest.mark.parametrize("body", [b"", DATA], ids=["empty-body", "short-body"])
+def test_slow_headers_stop_at_the_deadline(zenodo, public, monkeypatch, body):
+    monkeypatch.setattr(zenodo_module, "DEADLINE_SECONDS", 0.5)
+    release = threading.Event()
+
+    def slow(handler):
+        release.wait(5)  # headers arrive well after the deadline
+        handler.send_response(200)
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+
+    zenodo.routes["/api/records/101"] = slow
+
+    # The server holds the headers for 5 s; capped timeouts give up near the
+    # 0.5 s deadline, well inside the 2 s bound.
+    outcome = _bounded(lambda: public.record_files(101), release, seconds=2)
+
+    assert isinstance(outcome.get("error"), RepositoryError)
+
+
+def test_a_body_finished_after_the_deadline_is_not_returned():
+    class Finished:
+        headers = {}
+
+        def read1(self, amount, decode_content=False):
+            return b""
+
+    with pytest.raises(RepositoryError, match="took too long"):
+        zenodo_module._read_capped(Finished(), max_bytes=1024, deadline=time.monotonic() - 1)
+
+
+@pytest.mark.parametrize(
+    "files",
+    [5, True, 1.5, "data.csv", {"entries": ["x"]}, {"entries": "bad"}, {"entries": 3}, None],
+    ids=["int", "bool", "float", "text", "entries-list", "entries-text", "entries-int", "null"],
+)
+def test_a_malformed_file_collection_lists_no_files(zenodo, public, files):
+    record = {"id": 110, "access": {"record": "public", "files": "public"}, "files": files}
+    zenodo.routes["/api/records/110"] = (200, {}, json.dumps(record).encode())
+
+    listing = public.record_files(110)
+
+    assert listing["downloadable"] is False and listing["files"] == []
+
+
+def test_a_file_without_a_usable_key_is_not_listed(zenodo, public):
+    entry = {"key": ["data.csv"], "links": {"content": "/api/records/111/files/data.csv/content"}}
+    record = {"id": 111, "access": {"record": "public", "files": "public"}, "files": [entry]}
+    zenodo.routes["/api/records/111"] = (200, {}, json.dumps(record).encode())
+
+    assert public.record_files(111)["downloadable"] is False
+    with pytest.raises(RecordNotDownloadable):
+        public.download(111, None, max_bytes=1024)
+
+
+@pytest.mark.parametrize("access", [[], "public", None, 1])
+def test_a_malformed_access_block_is_never_open_even_with_a_legacy_open_flag(zenodo, public, access):
+    record = json.loads((FIXTURES / "record_open_legacy.json").read_text().replace(RECORDED_HOST, zenodo.base))
+    record["access"] = access
+    zenodo.routes["/api/records/106"] = (200, {}, json.dumps(record).encode())
+    zenodo.file(106)
+
+    assert public.record_files(106)["downloadable"] is False
+    with pytest.raises(RecordNotDownloadable):
+        public.download(106, "data.csv", max_bytes=1024)
+
+
+def test_the_installed_urllib3_has_what_public_reads_need():
+    import inspect
+
+    import urllib3
+
+    assert "decode_content" in inspect.signature(urllib3.HTTPResponse.read1).parameters

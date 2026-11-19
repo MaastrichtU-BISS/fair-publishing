@@ -24,7 +24,9 @@ While the version is 0.x, minor releases may contain breaking changes.
     redirects included. Each redirect is checked before it is followed, and its
     body is not read. URLs with backslashes, whitespace or credentials are refused.
   - Record ids must be numeric.
-  - Each read has a 10-minute overall deadline, as well as a 120 s socket timeout.
+  - Each request (the record read, the file fetch) has a 10-minute overall
+    deadline, redirects included; connect and read timeouts are capped at the
+    time left.
   - A malformed record or file entry reads as not downloadable or raises
     `RepositoryError`, never a bare Python error. Relative file links resolve
     against the record as served, and links off Zenodo are left out of the listing.
@@ -39,7 +41,7 @@ While the version is 0.x, minor releases may contain breaking changes.
   record id, for a host's Community source.
 - The registry gets a `creators` column (revision `fp_0002_publication_creators`).
   Entries published before this version list no creators.
-- `urllib3>=2` is now a direct dependency.
+- `urllib3>=2.2` is now a direct dependency (`HTTPResponse.read1` arrived in 2.2).
 
 ### Changed
 
