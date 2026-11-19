@@ -9,6 +9,10 @@ CHUNK_BYTES = 64 * 1024
 MAX_REDIRECTS = 3
 GONE_STATUSES = (404, 410)
 REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+# Ask for the InvenioRDM shape (an `access` block, files as entries with a
+# `content` link); without it Zenodo answers in its legacy shape, which _access
+# and _file read as well.
+RECORD_ACCEPT = {"Accept": "application/vnd.inveniordm.v1+json"}
 
 
 class RepositoryError(Exception):
@@ -100,19 +104,21 @@ class Zenodo:
         RecordNotDownloadable when Zenodo no longer has the record.
         """
         try:
-            response = requests.get(f"{self.base_url}/api/records/{record_id}", timeout=TIMEOUT_SECONDS)
+            response = requests.get(
+                f"{self.base_url}/api/records/{record_id}", headers=RECORD_ACCEPT, timeout=TIMEOUT_SECONDS
+            )
             if response.status_code in GONE_STATUSES:
                 raise RecordNotDownloadable()
             record = self._check(response, "read the record")
         except requests.RequestException as exc:
             raise RepositoryError(f"Zenodo did not answer: {type(exc).__name__}") from exc
-        access = record.get("access") or {}
+        access = _access(record)
         files = [_file(entry) for entry in _entries(record.get("files"))]
-        open_to_all = access.get("record") == "public" and access.get("files") == "public"
+        open_to_all = access["record"] == "public" and access["files"] == "public"
         downloadable = open_to_all and bool(files)
         return {
             "record_id": str(record.get("id", record_id)),
-            "access": {"record": access.get("record"), "files": access.get("files")},
+            "access": access,
             "downloadable": downloadable,
             "files": files if downloadable else [],
         }
@@ -160,6 +166,17 @@ class Zenodo:
         raise RepositoryError("Zenodo redirected the file too many times")
 
 
+def _access(record):
+    """{"record", "files"} as "public" or not. The legacy shape has only
+    metadata.access_right, where "open" means record and files are public."""
+    access = record.get("access")
+    if isinstance(access, dict):
+        return {"record": access.get("record"), "files": access.get("files")}
+    right = (record.get("metadata") or {}).get("access_right")
+    level = "public" if right == "open" else right
+    return {"record": level, "files": level}
+
+
 def _entries(files):
     """Zenodo lists a record's files as a list, or, in its newer records API, as entries keyed by name."""
     if isinstance(files, dict):
@@ -173,8 +190,13 @@ def _file(entry):
         "key": entry.get("key") or entry.get("filename"),
         "size": entry.get("size", entry.get("filesize")),
         "checksum": entry.get("checksum"),
-        "url": links.get("content") or links.get("download"),
+        "url": links.get("content") or links.get("download") or _content_link(links.get("self")),
     }
+
+
+def _content_link(link):
+    """The legacy shape's `self` file link is the content itself; the RDM one is not."""
+    return link if link and link.rstrip("/").endswith("/content") else None
 
 
 def _read_capped(response, max_bytes):

@@ -1,0 +1,32 @@
+{
+  "id": 103,
+  "doi": "10.5281/zenodo.8433301",
+  "conceptrecid": "8433300",
+  "created": "2023-10-12T02:36:57.930196+00:00",
+  "state": "done",
+  "status": "published",
+  "submitted": true,
+  "title": "A new method for quantifying flake scar organisation on cores using orientation statistics",
+  "metadata": {
+    "access_right": "open",
+    "title": "A new method for quantifying flake scar organisation on cores using orientation statistics",
+    "resource_type": {
+      "title": "Dataset",
+      "type": "dataset"
+    }
+  },
+  "files": [
+    {
+      "id": "e048555a-bb33-40fd-a54a-8cf83f6f114d",
+      "key": "data.csv",
+      "size": null,
+      "checksum": "md5:bdf900a870fec8bf9776a1142fa95031",
+      "links": {
+        "self": "https://zenodo.test/api/records/103/files/data.csv/content"
+      }
+    }
+  ],
+  "links": {
+    "self": "https://zenodo.test/api/records/103"
+  }
+}

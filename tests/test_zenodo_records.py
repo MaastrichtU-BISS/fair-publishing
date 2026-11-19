@@ -105,7 +105,7 @@ def test_no_token_is_sent_to_read_or_fetch_a_public_file(http):
     client.download(101, "data.csv", max_bytes=1024)
 
     assert len(http.calls) == 2
-    assert all("headers" not in call for call in http.calls)
+    assert all("Authorization" not in (call.get("headers") or {}) for call in http.calls)
 
 
 @pytest.mark.parametrize(
@@ -212,3 +212,34 @@ def test_a_record_read_that_does_not_connect_is_a_repository_error(http, public)
 
     with pytest.raises(RepositoryError, match="Zenodo did not answer: ConnectionError"):
         public.record_files(101)
+
+
+def test_the_record_is_asked_for_in_its_rdm_shape(http, public):
+    http.serve_record("record_open_entries.json")
+
+    public.record_files(102)
+
+    assert http.calls[0]["headers"] == {"Accept": "application/vnd.inveniordm.v1+json"}
+
+
+def test_an_open_record_in_the_legacy_shape_downloads(http, public):
+    # Trimmed from a real capture: no `access` block, openness in
+    # metadata.access_right, and the file's content link under `self`.
+    http.serve_record("record_open_legacy.json")
+    content = f"{BASE}/api/records/103/files/data.csv/content"
+    http.replies[content] = Reply(200, content=DATA)
+
+    record = public.record_files(103)
+
+    assert record["downloadable"] is True
+    assert record["access"] == {"record": "public", "files": "public"}
+    assert record["files"][0]["url"] == content
+    assert public.download(103, "data.csv", max_bytes=len(DATA)) == DATA
+
+
+def test_a_restricted_record_in_the_legacy_shape_is_not_downloadable(http, public):
+    http.serve_record("record_restricted_legacy.json")
+
+    assert public.record_files(104)["downloadable"] is False
+    with pytest.raises(RecordNotDownloadable):
+        public.download(104, "data.csv", max_bytes=len(DATA))
